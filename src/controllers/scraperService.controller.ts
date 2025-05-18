@@ -44,7 +44,7 @@ export const ScraperService = {
 
       // 🧠 Check memory before Playwright
       const heapUsedMB = process.memoryUsage().heapUsed / 1024 / 1024
-      if (heapUsedMB > 235) {
+      if (heapUsedMB > 210) {
         console.warn('⚠️ Memory too high for Playwright, using Cheerio fallback')
         return await fallbackToCheerio(requestQueue)
       }

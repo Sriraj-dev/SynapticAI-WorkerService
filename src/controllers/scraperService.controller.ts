@@ -4,9 +4,15 @@ import { CheerioCrawler, PlaywrightCrawler, RequestQueue } from "crawlee";
 export const ScraperService = {
   async getWebsiteContent(url : string){
       let content = '';
+      console.log("Adding to request queue: ", url)
+      console.log(process.memoryUsage())
+
       const requestQueue = await RequestQueue.open();
     
       await requestQueue.addRequest({ url: url });
+      console.log(process.memoryUsage())
+
+      console.log("Added to request queue: ", url)
       
       const playwrightCrawler = new PlaywrightCrawler({
         requestQueue,

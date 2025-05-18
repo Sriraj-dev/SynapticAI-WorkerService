@@ -49,7 +49,6 @@ app.onError((err, c) => {
 
 app.get('/', (c) => c.text('SynapticAI WorkerService can only be access from SynapticAI Server'))
 app.route('/crawler', ScraperServiceRouter)
-
 serve(
     {
         fetch: app.fetch,

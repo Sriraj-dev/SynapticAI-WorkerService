@@ -16,12 +16,6 @@ export const ScraperService = {
       
       const playwrightCrawler = new PlaywrightCrawler({
         requestQueue,
-        launchContext: {
-          launchOptions: {
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-          },
-        },
         async requestHandler({ page }) {
           console.log("Scraping : ", page.url())
           await page.waitForLoadState('networkidle'); // Wait for dynamic content

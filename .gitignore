@@ -20,3 +20,6 @@ build/
 
 # System files
 .DS_Store
+
+# Playwright storage
+storage/

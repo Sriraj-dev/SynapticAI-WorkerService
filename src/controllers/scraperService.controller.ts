@@ -10,9 +10,9 @@ export const ScraperService = {
       const requestQueue = await RequestQueue.open();
     
       await requestQueue.addRequest({ url: url });
-      console.log(process.memoryUsage())
-
       console.log("Added to request queue: ", url)
+      
+      console.log(process.memoryUsage())
       
       const playwrightCrawler = new PlaywrightCrawler({
         requestQueue,

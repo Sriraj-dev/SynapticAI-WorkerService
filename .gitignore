@@ -10,6 +10,8 @@ bun.lockb
 .env
 .env.local
 .env.*.local
+.env.dev
+.env.prod
 
 # Build output
 dist/

@@ -1,5 +1,6 @@
 # Node modules
 node_modules/
+storage/
 
 # Bun lock file (optional, since you're using pnpm now)
 bun.lockb
@@ -23,5 +24,5 @@ build/
 # System files
 .DS_Store
 
-# Playwright storage
-storage/
+.storage
+.storage

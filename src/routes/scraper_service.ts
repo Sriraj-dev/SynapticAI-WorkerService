@@ -1,4 +1,3 @@
-
 import { ScraperService } from "../controllers/scraperService.controller";
 import { Hono } from "hono";
 
@@ -9,7 +8,10 @@ ScraperServiceRouter.get('/crawl-website', async (c) => {
     if (!url || !url.startsWith('http')) {
       return c.json({ error: 'Invalid URL' }, 400);
     }
-  
+
+    console.log(`Scraping website: ${url}`)
+    console.log(process.memoryUsage())
+
     try {
       const content = await ScraperService.getWebsiteContent(url);
       return c.json({ url, content });

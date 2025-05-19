@@ -46,11 +46,16 @@ app.onError((err, c) => {
 	return c.json({ message: 'Internal Server Error' , detail: `Name: ${err.name},Message : ${err.message}, Stack: ${err.stack}, Cause: ${err.cause}`}, 500)
 })
 
-
+console.log(process.memoryUsage())
 app.get('/', (c) => c.text('SynapticAI WorkerService can only be access from SynapticAI Server'))
 app.route('/crawler', ScraperServiceRouter)
-
-serve({fetch: app.fetch, port: process.env.WORKER_SERVICE_PORT? parseInt(process.env.WORKER_SERVICE_PORT) : 5001})
+serve(
+    {
+        fetch: app.fetch,
+        port: process.env.WORKER_SERVICE_PORT? parseInt(process.env.WORKER_SERVICE_PORT) : 5001,
+        hostname: '::'
+    }
+)
 
 console.log(`✅ SynapticAI Worker Service is running at ${process.env.WORKER_SERVICE_PORT} in ${process.env.ENVIRONMENT} environment`)
 

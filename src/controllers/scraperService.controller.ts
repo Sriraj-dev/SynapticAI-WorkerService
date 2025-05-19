@@ -1,15 +1,61 @@
 import { CheerioCrawler, PlaywrightCrawler, RequestQueue } from "crawlee";
 
 
+
+function logMemory(label: string) {
+  const mem = process.memoryUsage()
+  const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(2) + 'MB'
+  console.log(`[${label}] Memory - RSS: ${mb(mem.rss)}, HeapUsed: ${mb(mem.heapUsed)}, HeapTotal: ${mb(mem.heapTotal)}`)
+}
+
+async function fallbackToCheerio(requestQueue: RequestQueue){
+  let content = '';
+  const cheerioCrawler = new CheerioCrawler({
+    requestQueue,
+    async requestHandler({ $ }) {
+      $('script, style, nav, header, footer, iframe, noscript').remove();
+      const rawText = $('body').text();
+      content = rawText.replace(/\s+/g, " ").trim();
+    },
+  });
+  logMemory('After Cherio Initialisation')
+  
+  try{
+    await cheerioCrawler.run();
+    logMemory('After Cheerio Execution')
+    return content;
+  }catch(err){
+    console.error(err)
+    return ''
+  }
+}
+
 export const ScraperService = {
-    async getWebsiteContent(url : string){
-        let content = '';
-        const requestQueue = await RequestQueue.open();
-      
-        await requestQueue.addRequest({ url: url });
-        
+  async getWebsiteContent(url : string){
+      let content = ''
+
+      console.log('📥 Adding to request queue:', url)
+      logMemory('Before Queue Init')
+
+      const requestQueue = await RequestQueue.open(undefined, {})
+
+      await requestQueue.addRequest({ url })
+      logMemory('After Queue Add')
+
+      // 🧠 Check memory before Playwright
+      const heapUsedMB = process.memoryUsage().heapUsed / 1024 / 1024
+      if (heapUsedMB > 210) {
+        console.warn('⚠️ Memory too high for Playwright, using Cheerio fallback')
+        return await fallbackToCheerio(requestQueue)
+      }
+    
+      try {
+        console.log('🚀 Launching PlaywrightCrawler')
+        logMemory('Before PlaywrightCrawler Init')
+
         const playwrightCrawler = new PlaywrightCrawler({
           requestQueue,
+          maxRequestsPerCrawl: 1,
           launchContext: {
             launchOptions: {
               headless: true,
@@ -17,44 +63,25 @@ export const ScraperService = {
             },
           },
           async requestHandler({ page }) {
-            console.log("Scraping : ", page.url())
-            await page.waitForLoadState('networkidle'); // Wait for dynamic content
+            console.log('🔍 Scraping with Playwright:', page.url())
+            await page.waitForLoadState('networkidle')
             content = await page.evaluate(() => {
-              document.querySelectorAll("script, style, nav, header, footer, iframe, noscript").forEach(el => el.remove());
-              return document.body.innerText.replace(/\s+/g, " ").trim();
-            });
+              document.querySelectorAll('script, style, nav, header, footer, iframe, noscript').forEach(el => el.remove())
+              return document.body.innerText.replace(/\s+/g, ' ').trim()
+            })
           },
           requestHandlerTimeoutSecs: 15,
-        });
-      
-        try {
-          await playwrightCrawler.run();
-          return content;
-        } catch (error) {
-          console.warn('Playwright failed, falling back to Cheerio (SSR):', error);
-        }
-      
-        if(requestQueue.getTotalCount() == 0){
-          requestQueue.addRequest({ url: url });
-        }
-      
-        const cheerioCrawler = new CheerioCrawler({
-          requestQueue,
-          async requestHandler({ $ }) {
-            $('script, style, nav, header, footer, iframe, noscript').remove();
-            const rawText = $('body').text();
-            content = rawText.replace(/\s+/g, " ").trim();
-          },
-        });
-        
-        try{
-          await cheerioCrawler.run();
-          return content;
-        }catch(err){
-          console.error(err)
-          return ''
-        }
-    }
+        })
 
+        logMemory('After PlaywrightCrawler Init')
+
+        await playwrightCrawler.run();
+        return content;
+      } catch (error) {
+        console.warn('Playwright failed, falling back to Cheerio (SSR):', error);
+        fallbackToCheerio(requestQueue)
+      }
     
+      return ''
+    }
 }

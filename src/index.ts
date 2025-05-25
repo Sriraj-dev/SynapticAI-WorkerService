@@ -5,6 +5,7 @@ import { serve } from '@hono/node-server'
 import { ScraperServiceRouter } from "./routes/scraper_service";
 import { StatusCodes } from './utils/ErrorHandling/statusCodes';
 import { AppError } from './utils/ErrorHandling/errors';
+import { InvokeRedisQueueHandlers } from './handlers/redis.queue.handlers';
 
 
 const app = new Hono();
@@ -57,5 +58,7 @@ serve(
     }
 )
 
+
 console.log(`✅ SynapticAI Worker Service is running at ${process.env.WORKER_SERVICE_PORT} in ${process.env.ENVIRONMENT} environment`)
 
+InvokeRedisQueueHandlers()

@@ -23,9 +23,11 @@ async function fallbackToCheerio(requestQueue: RequestQueue){
   try{
     await cheerioCrawler.run();
     logMemory('After Cheerio Execution')
+    requestQueue.drop()
     return content;
   }catch(err){
     console.error(err)
+    requestQueue.drop()
     return ''
   }
 }
@@ -37,7 +39,7 @@ export const ScraperService = {
       console.log('📥 Adding to request queue:', url)
       logMemory('Before Queue Init')
 
-      const requestQueue = await RequestQueue.open(undefined, {})
+      const requestQueue = await RequestQueue.open(`queue-${crypto.randomUUID()}`)
 
       await requestQueue.addRequest({ url })
       logMemory('After Queue Add')
@@ -76,12 +78,12 @@ export const ScraperService = {
         logMemory('After PlaywrightCrawler Init')
 
         await playwrightCrawler.run();
+        requestQueue.drop()
+
         return content;
       } catch (error) {
         console.warn('Playwright failed, falling back to Cheerio (SSR):', error);
-        fallbackToCheerio(requestQueue)
+        return fallbackToCheerio(requestQueue)
       }
-    
-      return ''
     }
 }

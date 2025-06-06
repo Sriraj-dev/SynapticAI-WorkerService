@@ -2,13 +2,16 @@ import { embeddingModel } from "../services/AI/aiModels";
 import redis from "../services/redis";
 import { AppError } from "../utils/ErrorHandling/errors";
 import { StatusCodes } from "../utils/ErrorHandling/statusCodes";
-import { CreateSemanticsJob, DeleteSemanticsJob, JobQueue, UpdateSemanticsJob } from "../utils/redis/constants";
+import type { CreateSemanticsJob, DeleteSemanticsJob, UpdateSemanticsJob } from "../utils/redis/constants";
+import { JobQueue } from "../utils/redis/constants";
 import {TokenTextSplitter} from "@langchain/textsplitters"
-import { NoteStatusLevel, semanticNotes } from "../services/Postgres/schema";
-import { InferInsertModel } from "drizzle-orm";
+import { NoteStatusLevel, NoteStatusReason, semanticNotes } from "../services/Postgres/schema";
+import type { InferInsertModel } from "drizzle-orm";
 import { DBHandler } from "../services/Postgres/DbHandler";
+import { UserUsageMetricsHandler } from "./usage.metrics.handler";
+import { estimateTokens } from "../utils/utility_methods";
 
-const Handlers = {
+const RedisQueueHandlers = {
 
     async CreateNoteSemantics(rawJob : string){
         console.log("Creating note semantics: ", rawJob)
@@ -16,6 +19,15 @@ const Handlers = {
         const {noteId, userId, data} = job
 
         try{
+            // Check usage limits before proceeding
+            const canUseKnowledgeBase = await UserUsageMetricsHandler.checkKnowledgeBaseUsageLimit(userId);
+
+            if(!canUseKnowledgeBase) {
+                console.warn("User has reached the limit for knowledge base usage, skipping note semantics creation")
+                await DBHandler.updateNoteStatus(NoteStatusLevel.FailedToMemorize, noteId, NoteStatusReason.TokenLimitReached)
+                return
+            }
+
             //1. Convert the notes into proper chunks
             const splitter = new TokenTextSplitter({
                 chunkSize: 150,
@@ -45,6 +57,9 @@ const Handlers = {
             //4. Mark the status as completed in notes table
             await DBHandler.updateNoteStatus(NoteStatusLevel.Completed, noteId)
 
+            //5. Update the user usage metrics
+            await UserUsageMetricsHandler.updateUsageMetrics(userId, estimateTokens(data));
+
             console.log("✅ Created note semantics for note: ", noteId)
         }catch(err){
             console.error("Error in creating note semantics", err)
@@ -60,7 +75,7 @@ const Handlers = {
         try{
             await DBHandler.deleteEmbeddings(noteId)
 
-            await DBHandler.updateNoteStatus(NoteStatusLevel.FailedToMemorize, noteId)
+            await DBHandler.updateNoteStatus(NoteStatusLevel.FailedToMemorize, noteId, NoteStatusReason.UserCancelled)
 
             console.log("✅ Deleted note semantics for note: ", noteId)
         }catch(err){
@@ -81,8 +96,11 @@ const Handlers = {
             //2. Update the status of the note
             await DBHandler.updateNoteStatus(NoteStatusLevel.Memorizing, noteId)
 
+            // Update the usage metrics.
+            await UserUsageMetricsHandler.updateUsageMetrics(userId, -1 * estimateTokens(data));
+
             //3. Insert new embeddings
-            await Handlers.CreateNoteSemantics(rawJob)
+            await RedisQueueHandlers.CreateNoteSemantics(rawJob)
             console.log("✅ Updated note semantics for note: ", noteId)
         }catch(err){
             console.error("Error in updating note semantics", err)
@@ -110,13 +128,13 @@ export async function InvokeRedisQueueHandlers(){
 
             switch(queue){
                 case JobQueue.CREATE_SEMANTICS:
-                    await Handlers.CreateNoteSemantics(job)
+                    await RedisQueueHandlers.CreateNoteSemantics(job)
                     break
                 case JobQueue.UPDATE_SEMANTICS:
-                    await Handlers.UpdateNoteSemantics(job)
+                    await RedisQueueHandlers.UpdateNoteSemantics(job)
                     break
                 case JobQueue.DELETE_SEMANTICS:
-                    await Handlers.DeleteNoteSemantics(job)
+                    await RedisQueueHandlers.DeleteNoteSemantics(job)
                     break
                 default:
                     throw new AppError("Invalid Job Type", StatusCodes.NOT_FOUND)

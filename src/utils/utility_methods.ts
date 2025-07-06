@@ -14,3 +14,22 @@ export function estimateTokens(text: string): number {
     throw error;
   }
 }
+
+export function convertMarkdownToText(markdown : string){
+  return markdown
+  // Convert links: [text](url) -> text (url)
+  .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+  // Remove images: ![alt](url) -> alt
+  .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1')
+  // Remove emphasis/bold/strikethrough/inline code: *text*, _text_, **text**, __text__, ~~text~~, `code`
+  .replace(/(\*\*|__|\*|_|~~|`)(.*?)\1/g, '$2')
+  // Remove headings and blockquote markers
+  .replace(/^\s{0,3}(#{1,6}|>+)\s?/gm, '')
+  // Remove horizontal rules
+  .replace(/^-{3,}$/gm, '')
+  // Remove remaining markdown symbols (lists etc)
+  .replace(/^[\s]*([-+*])\s+/gm, '')
+  // Remove extra spaces
+  .replace(/\n{2,}/g, '\n\n')
+  .trim();
+}

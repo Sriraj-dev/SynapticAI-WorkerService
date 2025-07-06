@@ -1,7 +1,7 @@
 import { AnyColumn, eq, type InferInsertModel, sql } from "drizzle-orm"
 import { db } from "./connectToPG"
 import { notes, NoteStatusLevel, NoteStatusReason, semanticNotes, SubscriptionTier, userUsageMetrics } from "./schema"
-import type { NewUserUsageMetrics, UserUsageMetrics } from "../../utils/models"
+import type { NewUserUsageMetrics, Note, UserUsageMetrics } from "../../utils/models"
 
 export const DBHandler = {
 
@@ -32,7 +32,7 @@ export const DBHandler = {
         }
     },
 
-    async updateNoteStatus(status : NoteStatusLevel,noteId: string,reason? : NoteStatusReason){
+    async updateNote(status : NoteStatusLevel,noteId: string,reason? : NoteStatusReason, content? : string){
         try{
             const note = await db.select().from(notes).where(eq(notes.uid, noteId)).limit(1);
 
@@ -41,7 +41,16 @@ export const DBHandler = {
                 return;
             }
 
-            await db.update(notes).set({status: status, reason: reason}).where(eq(notes.uid, noteId))
+            const updateFields: Partial<Note> = {
+                status,
+                reason,
+            };
+    
+            if (content !== undefined && content !== null) {
+                updateFields.content = content;
+            }    
+
+            await db.update(notes).set(updateFields).where(eq(notes.uid, noteId))
 
             console.log(`✅ Updated note status for note ${noteId} to ${status}`)
         }catch(err){

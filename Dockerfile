@@ -1,22 +1,27 @@
-# Use your exact Bun version
+# Use your bun version
 FROM oven/bun:1.2.13
 
-# install python3 + pip
-RUN apt-get update && apt-get install -y python3 python3-pip
+# Install python and pip
+RUN apt-get update && apt-get install -y python3 python3-pip python3-venv
 
-# install python dependencies
-RUN pip install youtube-transcript-api
+# Create a virtual environment
+RUN python3 -m venv /venv
+
+# Activate venv and install youtube-transcript-api
+RUN /venv/bin/pip install youtube-transcript-api
 
 # set working directory
 WORKDIR /app
 
-# copy your Bun project
+# Copy project files
 COPY . .
 
-# install Bun dependencies
+# install bun deps
 RUN bun install
 
-# no EXPOSE needed (this is a worker, no HTTP server)
+# no EXPOSE needed
+# but set venv path so python in your scripts uses it
+ENV PATH="/venv/bin:$PATH"
 
-# run your worker entrypoint
+# run worker
 CMD ["bun", "src/index.ts"]

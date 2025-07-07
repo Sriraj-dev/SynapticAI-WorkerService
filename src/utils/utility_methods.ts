@@ -1,4 +1,5 @@
 import {encode} from 'gpt-tokenizer';
+import { fetchTranscriptFromPublicAPI, fetchTranscriptFromPythonScript } from './yt_transcript_utils';
 
 
 export function logMemory(label: string) {
@@ -16,32 +17,7 @@ export function estimateTokens(text: string): number {
   }
 }
 
-async function fetchTranscript(videoId: string): Promise<string | null> {
-  const proc = Bun.spawn(["python3", "src/utils/transcript_generator.py", videoId], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
 
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-
-  if (stderr) {
-    console.error("Python stderr:", stderr);
-  }
-
-  try {
-    const result = JSON.parse(stdout);
-    if (result.transcript) {
-      return result.transcript;
-    } else {
-      console.error("Transcript error:", result.error);
-      return null;
-    }
-  } catch (err) {
-    console.error("JSON parse error:", err);
-    return null;
-  }
-}
 
 export async function convertMarkdownToText(markdown: string): Promise<string> {
   // first, extract any YouTube iframe src
@@ -88,7 +64,7 @@ export async function convertMarkdownToText(markdown: string): Promise<string> {
   // finally append the transcript of each youtube video
   for(const videoId of youtubeVideoIds) {
     try {
-      const transcriptString = await fetchTranscript(videoId)
+      const transcriptString = await fetchTranscriptFromPublicAPI(videoId)
       noHtml += `\n[Embedded Video]:${transcriptString}`;
     } catch (error) {
       console.error(`Error fetching transcript for video ${videoId}:`, error);

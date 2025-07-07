@@ -1,4 +1,4 @@
-import { AnyColumn, eq, type InferInsertModel, sql } from "drizzle-orm"
+import { and, AnyColumn, eq, inArray, type InferInsertModel, sql } from "drizzle-orm"
 import { db } from "./connectToPG"
 import { notes, NoteStatusLevel, NoteStatusReason, semanticNotes, SubscriptionTier, userUsageMetrics } from "./schema"
 import type { NewUserUsageMetrics, Note, UserUsageMetrics } from "../../utils/models"
@@ -28,6 +28,34 @@ export const DBHandler = {
             console.log(`✅ Deleted chunk embeddings for note ${noteId}`)
         }catch(err){
             console.error("❌ Error in deleting chunk embeddings", err)
+            throw err;
+        }
+    },
+
+    async deleteSemanticChunksByHashes(noteId : string, hashes : string[]){
+        try{
+            await db.delete(semanticNotes).where(and(
+                eq(semanticNotes.noteId, noteId),
+                inArray(semanticNotes.hash, hashes)
+            ))
+
+            console.log(`✅ Deleted chunk embeddings for note ${noteId}`)
+        }catch(err){
+            console.error("❌ Error in deleting chunk embeddings", err)
+            throw err;
+        }
+    },
+
+    async getSemanticChunks(noteId : string){
+        try{
+            const chunks = await db.select().from(semanticNotes).where(eq(semanticNotes.noteId, noteId))
+            if(chunks.length === 0) {
+                console.warn(`⚠️ No semantic chunks found for note ${noteId}`);
+                return [];
+            }
+            return chunks
+        }catch(err){
+            console.error("❌ Error in getting semantic chunks", err)
             throw err;
         }
     },

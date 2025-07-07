@@ -1,6 +1,18 @@
 import {encode} from 'gpt-tokenizer';
-import { fetchTranscriptFromPublicAPI, fetchTranscriptFromPythonScript } from './yt_transcript_utils';
+import { fetchTranscriptFromPublicAPI } from './yt_transcript_utils';
+import { RedisStorage } from '../services/redis/storage';
+import { unified } from 'unified'
+import remarkParse from 'remark-parse'
+import { Node } from 'unist'
+import { TokenTextSplitter } from '@langchain/textsplitters';
+import { createHash } from 'crypto'
 
+const MAX_CHUNK_SIZE = 150; //Tokens
+
+
+export function hashChunk(input: string): string {
+  return createHash('sha256').update(input).digest('hex')
+}
 
 export function logMemory(label: string) {
   const mem = process.memoryUsage()
@@ -17,94 +29,127 @@ export function estimateTokens(text: string): number {
   }
 }
 
+export async function splitMarkdownIntoRagChunks(markdown: string): Promise<string[]> {
+  const tree = unified()
+      .use(remarkParse)
+      .parse(markdown)
 
-
-export async function convertMarkdownToText(markdown: string): Promise<string> {
-  // first, extract any YouTube iframe src
+  const chunks: string[] = []
   const youtubeVideoIds: string[] = [];
+  let currentChunk = ''
+  let currentSize = 0
 
-  // match iframe tags with src containing youtube
-  const iframeRegex = /<iframe[^>]+src="([^"]+youtube[^"]+)"[^>]*><\/iframe>/gi;
-
-  let match;
-  while ((match = iframeRegex.exec(markdown)) !== null) {
-    const src = match[1];
-    
-    const videoIdMatch = src.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]+)/);
-    if (videoIdMatch) {
-      const videoId = videoIdMatch[1];
-      youtubeVideoIds.push(videoId);
-    }
+  function extractYouTubeVideoId(html: string): string | null {
+    const regex = /src="https:\/\/www\.youtube\.com\/embed\/([\w-]+)/;
+    const match = html.match(regex);
+    return match ? match[1] : null;
   }
 
-  // remove all HTML tags (conservatively)
-  let noHtml = markdown.replace(/<[^>]+>/g, "");
+  function nodeToString(node: Node): string {
+      if (node.type === 'code') {
+          const n = node as any
+          return `${n.lang || ''}\n${n.value}\n`
+      }
+      if (node.type === 'heading') {
+          return '#'.repeat((node as any).depth) + ' ' + (node as any).children.map(nodeToString).join('') + '\n'
+      }
+      if (node.type === 'paragraph' || node.type === 'list' || node.type === 'blockquote') {
+          return (node as any).children.map(nodeToString).join('') + ' '
+      }
+      if (node.type === 'text') {
+          return (node as any).value
+      }
+      if (node.type === 'listItem') {
+          return '- ' + (node as any).children.map(nodeToString).join('') + ' '
+      }
+      if(node.type === 'html'){
+        const html = (node as any).value as string;
+        if (html.includes('data-youtube-video')) {
+            const videoId = extractYouTubeVideoId(html);
+            if (videoId) {
+                youtubeVideoIds.push(videoId);
+                console.log(`🎥 Found YouTube Video ID: ${videoId}`);
+            }
+        }
+        return '';
+      }
+      if(node.type === 'link'){
+        return (node as any).url + ' ' + (node as any).children.map(nodeToString).join('') + ' '
+      }
 
-  // then remove leftover iframes and divs
-  noHtml = noHtml.replace(/<\/?(div|iframe)[^>]*>/gi, "");
+      if((node as any).value){
+        return (node as any).value
+      }else if((node as any).children){
+        return (node as any).children.map(nodeToString).join(' ')
+      }
+      
+      return ''
+  }
 
-  // also remove horizontal rules
-  noHtml = noHtml.replace(/^---$/gm, "");
+  function walk(nodes: Node[]) {
+      for (const node of nodes) {
+          const blockText = nodeToString(node)
+          const blockSize = estimateTokens(blockText) 
 
-  // convert markdown links to text (text + url)
-  noHtml = noHtml.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)");
+          // check for heading2
+          if (node.type === 'heading' && (node as any).depth === 2) {
+              // flush current chunk before starting a new section
+              if (currentChunk.length > 0) {
+                  chunks.push(currentChunk.trim())
+              }
+              currentChunk = blockText
+              currentSize = blockSize
+              continue
+          }
 
-  // remove emphasis/bold/etc
-  noHtml = noHtml.replace(/(\*\*|__|\*|_|~~|`)(.*?)\1/g, "$2");
+          // check chunk size
+          if (currentSize + blockSize > MAX_CHUNK_SIZE) {
+              if (currentChunk.length > 0) {
+                  chunks.push(currentChunk.trim())
+              }
+              currentChunk = blockText
+              currentSize = blockSize
+          } else {
+              currentChunk += blockText + '\n'
+              currentSize += blockSize
+          }
+      }
+  }
 
-  // remove heading and blockquote symbols
-  noHtml = noHtml.replace(/^\s{0,3}(#{1,6}|>+)\s?/gm, "");
+  walk((tree as any).children)
 
-  // remove list markers
-  noHtml = noHtml.replace(/^[\s]*([-+*])\s+/gm, "");
+  // flush leftover
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk.trim())
+  }
 
-  // collapse multiple newlines
-  noHtml = noHtml.replace(/\n{2,}/g, "\n\n").trim();
+  const splitter = new TokenTextSplitter({
+      chunkSize: 150,
+      chunkOverlap: 25,
+  });
 
-  // finally append the transcript of each youtube video
-  for(const videoId of youtubeVideoIds) {
-    try {
+  for(const videoId of youtubeVideoIds){
+    try{
+      const cachedTranscript = await RedisStorage.getItem(`Transcript:${videoId}`);
+
+      if(cachedTranscript && cachedTranscript.length > 0){
+        const transcriptChunks = await splitter.splitText(cachedTranscript);
+        chunks.push(`[Embedded Video]:${transcriptChunks[0]}`); // Only adding the intro of the video;
+        continue;
+      }
+
       const transcriptString = await fetchTranscriptFromPublicAPI(videoId)
-      noHtml += `\n[Embedded Video]:${transcriptString}`;
-    } catch (error) {
-      console.error(`Error fetching transcript for video ${videoId}:`, error);
+
+      if(transcriptString){
+        RedisStorage.setItemAsync(`Transcript:${videoId}`, transcriptString, 60 * 60 * 2) // 2 Hours
+
+        const transcriptChunks = await splitter.splitText(transcriptString);
+        chunks.push(`[Embedded Video]:${transcriptChunks[0]}`); // Only adding the intro of the video;
+      }
+    }catch(err){
+      console.error("Could not fetch the transcript for the video ID:", videoId, err);
     }
   }
 
-  return noHtml;
+  return chunks
 }
-
-console.log(await convertMarkdownToText(`# SynapticAI
-
-Synaptic AI is a productivity Tool that helps users to create / update / delete their notes using a rich text editor & multiple other features like:
-
-- Chat with AI agent right from the browser
-- Make you AI remember everything you leanr
-- AI agent can create your tasks for you to manage.
-- Dashboard lets you interact with your memory & tasks very comfortably
-- We also have AI editing features in the application.
-- & what not , much more in the paid tiers,
-
-> Come & explore eveything with me , Thanks for supporting
-
-\`\`\`
-int main(){
-console.log("Hello World")!
-if(){}
-else{}
-}
-\`\`\`
-
-<div data-youtube-video="">
-<iframe class="rounded-lg border border-muted" width="640" height="480" allowfullscreen="true" autoplay="false" disablekbcontrols="false" enableiframeapi="false" endtime="0" ivloadpolicy="0" loop="false" modestbranding="false" origin="" playlist="" rel="1" src="https://www.youtube.com/embed/xN1-2p06Urc?rel=1" start="0"></iframe>
-</div>
-
----
-
-1. Last trial on the markdown.
-
-[https://www.apple.com/in-edu/shop/buy-ipad/ipad-pro/33.02-cm-13"-display-512gb-silver-wifi-cellular-standard-glass](https://www.apple.com/in-edu/shop/buy-ipad/ipad-pro/33.02-cm-13%22-display-512gb-silver-wifi-cellular-standard-glass)
-
-<div data-twitter="" src="https://x.com/ColePalmer_0/status/1941686041770881191">
-</div>`))
-

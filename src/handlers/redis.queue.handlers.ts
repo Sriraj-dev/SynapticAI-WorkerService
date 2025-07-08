@@ -66,7 +66,7 @@ export const SemanticsHandler = {
         try{
             await DBHandler.deleteEmbeddings(noteId)
 
-            await DBHandler.updateNote(NoteStatusLevel.FailedToMemorize, noteId, NoteStatusReason.UserCancelled)
+            await DBHandler.updateNote(NoteStatusLevel.NotMemorized, noteId, NoteStatusReason.UserCancelled)
 
             console.log("✅ Deleted note semantics for note: ", noteId)
         }catch(err){

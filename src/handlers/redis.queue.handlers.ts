@@ -20,7 +20,7 @@ export const SemanticsHandler = {
 
             if(!canUseKnowledgeBase) {
                 console.warn("User has reached the limit for knowledge base usage, skipping note semantics creation")
-                await DBHandler.updateNote(NoteStatusLevel.FailedToMemorize, noteId, NoteStatusReason.TokenLimitReached)
+                await DBHandler.updateNote(NoteStatusLevel.TierLimitReached, noteId, NoteStatusReason.TokenLimitReached)
                 return
             }
 
@@ -107,28 +107,31 @@ export const SemanticsHandler = {
             const canUseKnowledgeBase = await UserUsageMetricsHandler.checkKnowledgeBaseUsageLimit(userId);
             if(!canUseKnowledgeBase) {
                 console.warn("User has reached the limit for knowledge base usage, skipping note semantics update")
-                await DBHandler.updateNote(NoteStatusLevel.FailedToMemorize, noteId, NoteStatusReason.TokenLimitReached)
+                await DBHandler.updateNote(NoteStatusLevel.TierLimitReached, noteId, NoteStatusReason.TokenLimitReached)
                 return
             }
 
             //8. Insert the new chunks into the database.
-            const embeddings = await embeddingModel.getTextEmbeddings(newChunkRecords)
-            var records = embeddings.map((embedding, index) => {
-                return {
-                    userId,
-                    noteId,
-                    content: newChunkRecords[index],
-                    totalChunks: chunks.length,
-                    chunkIndex: index,
-                    hash: hashChunk(newChunkRecords[index]),
-                    embedding: null,
-                    embeddingV2: embedding
-                } as InferInsertModel<typeof semanticNotes>
-            })
-            await DBHandler.insertEmbeddings(records)
+            if(newChunkRecords.length !==0){
+                const embeddings = await embeddingModel.getTextEmbeddings(newChunkRecords)
+                var records = embeddings.map((embedding, index) => {
+                    return {
+                        userId,
+                        noteId,
+                        content: newChunkRecords[index],
+                        totalChunks: chunks.length,
+                        chunkIndex: index,
+                        hash: hashChunk(newChunkRecords[index]),
+                        embedding: null,
+                        embeddingV2: embedding
+                    } as InferInsertModel<typeof semanticNotes>
+                })
+                await DBHandler.insertEmbeddings(records)
+            }
 
             //9. Mark the note status as completed in postgres & redis.
             await DBHandler.updateNote(NoteStatusLevel.Completed, noteId)
+            await RedisStorage.removeItem(`Note:${noteId}`)
 
             //10. Update the User Usage Metrics Accordingly
             await UserUsageMetricsHandler.updateUsageMetrics(userId, estimateTokens(newChunkRecords.join(" ")));

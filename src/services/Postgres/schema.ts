@@ -36,6 +36,8 @@ export enum NoteStatusLevel{
     Memorizing = 'Memorizing',
     Updating = 'Updating',
     Completed = 'Completed',
+    NotMemorized = 'Not Memorized',
+    TierLimitReached = 'Memory Limit Reached',
     FailedToMemorize = 'Failed To Memorize',
     FailedToCreate = 'Failed To Create',
 }
@@ -99,6 +101,8 @@ export const semanticNotes = pgTable(
       totalChunks: integer("total_chunks"),
   
       chunkIndex: integer("chunk_index"),
+
+      hash: text("hash"),
   
       embedding: vector("embedding", { dimensions: 768 }),
   

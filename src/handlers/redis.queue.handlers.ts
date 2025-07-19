@@ -1,17 +1,13 @@
 import { embeddingModel } from "../services/AI/aiModels";
-import redis from "../services/redis";
-import { AppError } from "../utils/ErrorHandling/errors";
-import { StatusCodes } from "../utils/ErrorHandling/statusCodes";
 import type { CreateSemanticsJob, DeleteSemanticsJob, UpdateSemanticsJob } from "../utils/redis/constants";
-import { JobQueue } from "../utils/redis/constants";
-import {TokenTextSplitter} from "@langchain/textsplitters"
 import { NoteStatusLevel, NoteStatusReason, semanticNotes } from "../services/Postgres/schema";
 import type { InferInsertModel } from "drizzle-orm";
 import { DBHandler } from "../services/Postgres/DbHandler";
 import { UserUsageMetricsHandler } from "./usage.metrics.handler";
-import { estimateTokens } from "../utils/utility_methods";
+import { estimateTokens, hashChunk, splitMarkdownIntoRagChunks } from "../utils/utility_methods";
+import { RedisStorage } from "../services/redis/storage";
 
-const RedisQueueHandlers = {
+export const SemanticsHandler = {
 
     async CreateNoteSemantics(rawJob : string){
         console.log("Creating note semantics: ", rawJob)
@@ -24,17 +20,12 @@ const RedisQueueHandlers = {
 
             if(!canUseKnowledgeBase) {
                 console.warn("User has reached the limit for knowledge base usage, skipping note semantics creation")
-                await DBHandler.updateNoteStatus(NoteStatusLevel.FailedToMemorize, noteId, NoteStatusReason.TokenLimitReached)
+                await DBHandler.updateNote(NoteStatusLevel.TierLimitReached, noteId, NoteStatusReason.TokenLimitReached)
                 return
             }
 
-            //1. Convert the notes into proper chunks
-            const splitter = new TokenTextSplitter({
-                chunkSize: 150,
-                chunkOverlap: 25,
-            });
-
-            const chunks = await splitter.splitText(data);
+            //1. Convert the markdown notes into proper chunks
+            const chunks = await splitMarkdownIntoRagChunks(data)
 
             //2. Create Embeddings for each chunk
             const embeddings = await embeddingModel.getTextEmbeddings(chunks)
@@ -47,6 +38,7 @@ const RedisQueueHandlers = {
                     content: chunks[index],
                     totalChunks: chunks.length,
                     chunkIndex: index,
+                    hash: hashChunk(chunks[index]),
                     embedding: null,
                     embeddingV2: embedding
                 } as InferInsertModel<typeof semanticNotes>
@@ -55,27 +47,26 @@ const RedisQueueHandlers = {
             await DBHandler.insertEmbeddings(records)
 
             //4. Mark the status as completed in notes table
-            await DBHandler.updateNoteStatus(NoteStatusLevel.Completed, noteId)
+            await DBHandler.updateNote(NoteStatusLevel.Completed, noteId)
 
             //5. Update the user usage metrics
-            await UserUsageMetricsHandler.updateUsageMetrics(userId, estimateTokens(data));
+            await UserUsageMetricsHandler.updateUsageMetrics(userId, estimateTokens(chunks.join(" ")));
 
             console.log("✅ Created note semantics for note: ", noteId)
         }catch(err){
             console.error("Error in creating note semantics", err)
-            await DBHandler.updateNoteStatus(NoteStatusLevel.FailedToMemorize, noteId)
+            await DBHandler.updateNote(NoteStatusLevel.FailedToMemorize, noteId)
         }
     },
 
     async DeleteNoteSemantics(rawJob : string){
-        console.log("Deleting note semantics: ", rawJob)
         const job = JSON.parse(rawJob) as DeleteSemanticsJob
         const {noteId} = job
 
         try{
             await DBHandler.deleteEmbeddings(noteId)
 
-            await DBHandler.updateNoteStatus(NoteStatusLevel.FailedToMemorize, noteId, NoteStatusReason.UserCancelled)
+            await DBHandler.updateNote(NoteStatusLevel.NotMemorized, noteId, NoteStatusReason.UserCancelled)
 
             console.log("✅ Deleted note semantics for note: ", noteId)
         }catch(err){
@@ -84,64 +75,95 @@ const RedisQueueHandlers = {
         }
     },
 
+    //This job is usually triggered after 10m of inactivity on the note.
     async UpdateNoteSemantics(rawJob : string){
-        console.log("Updating note semantics: ", rawJob)
         const job = JSON.parse(rawJob) as UpdateSemanticsJob
         const {noteId, userId, data} = job
 
         try{
-            //1. Delete the existing embeddings
-            await DBHandler.deleteEmbeddings(noteId)
+            //1. Convert the markdown into chunks
+            const chunks = await splitMarkdownIntoRagChunks(data)
+            const currentHashSet: Set<string> = new Set(chunks.map(c => hashChunk(c)));
 
-            //2. Update the status of the note
-            await DBHandler.updateNoteStatus(NoteStatusLevel.Memorizing, noteId)
+            //2. Get the existing chunks of the note.
+            const existingChunks = await DBHandler.getSemanticChunks(noteId)
+            const existingHashSet = new Set(existingChunks.map(c => c.hash))
 
-            // Update the usage metrics.
-            await UserUsageMetricsHandler.updateUsageMetrics(userId, -1 * estimateTokens(data));
+            //3. Get the new chunk records that need to be inserted.
+            const newChunkRecords = chunks.filter(c => !existingHashSet.has(hashChunk(c)));
 
-            //3. Insert new embeddings
-            await RedisQueueHandlers.CreateNoteSemantics(rawJob)
+            //4. Get the chunk records that needs to be deleted.
+            const chunksToDelete = existingChunks.filter(c => !currentHashSet.has(c.hash!))
+            const hashesToDelete = chunksToDelete.map(c => c.hash!)
+
+            //5. Delete the chunks that are no longer needed.
+            await DBHandler.deleteSemanticChunksByHashes(noteId, hashesToDelete)
+            console.log(`✅ Deleted ${hashesToDelete.length} chunks for note: ${noteId}`)
+
+            //6. Update the user usage metrics accordingly.
+            await UserUsageMetricsHandler.updateUsageMetrics(userId, -1 * estimateTokens(chunksToDelete.map(c=>c.content).join(" ")));
+
+            //7. Check if we can proceed with inserting new chunks as per user limits.
+            const canUseKnowledgeBase = await UserUsageMetricsHandler.checkKnowledgeBaseUsageLimit(userId);
+            if(!canUseKnowledgeBase) {
+                console.warn("User has reached the limit for knowledge base usage, skipping note semantics update")
+                await DBHandler.updateNote(NoteStatusLevel.TierLimitReached, noteId, NoteStatusReason.TokenLimitReached)
+                return
+            }
+
+            //8. Insert the new chunks into the database.
+            if(newChunkRecords.length !==0){
+                const embeddings = await embeddingModel.getTextEmbeddings(newChunkRecords)
+                var records = embeddings.map((embedding, index) => {
+                    return {
+                        userId,
+                        noteId,
+                        content: newChunkRecords[index],
+                        totalChunks: chunks.length,
+                        chunkIndex: index,
+                        hash: hashChunk(newChunkRecords[index]),
+                        embedding: null,
+                        embeddingV2: embedding
+                    } as InferInsertModel<typeof semanticNotes>
+                })
+                await DBHandler.insertEmbeddings(records)
+            }
+
+            //9. Mark the note status as completed in postgres & redis.
+            await DBHandler.updateNote(NoteStatusLevel.Completed, noteId)
+            await RedisStorage.removeItem(`Note:${noteId}`)
+
+            //10. Update the User Usage Metrics Accordingly
+            await UserUsageMetricsHandler.updateUsageMetrics(userId, estimateTokens(newChunkRecords.join(" ")));
+
             console.log("✅ Updated note semantics for note: ", noteId)
+
         }catch(err){
             console.error("Error in updating note semantics", err)
+            await DBHandler.updateNote(NoteStatusLevel.FailedToMemorize, noteId)
         }
-
     }
 }
 
+export const PersistDataHandler = {
+    async PersistNoteData(rawJob: string){
+        console.log("Persisting note data: ", rawJob)
+        const job = JSON.parse(rawJob)
 
-export async function InvokeRedisQueueHandlers(){
-
-    // All the messages to sent to 3 queues are executed one by one, 
-    // TODO: Figure out if we can efficiently handle tasks paralelly per queue atleast.
-    // Tasks in a single queue can be executed one by one , no issues with that.
-    console.log("🔄 Starting Redis Queue Handlers...")
-    while (true){
+        const {noteId} = job
         try{
-            const res = await redis.blpop([JobQueue.UPDATE_SEMANTICS, JobQueue.CREATE_SEMANTICS, JobQueue.DELETE_SEMANTICS], 0)
-
-            if(!res) {
-                console.log("No job found in queue")
-                continue
-            };
-            const [queue, job] = res
-
-            switch(queue){
-                case JobQueue.CREATE_SEMANTICS:
-                    await RedisQueueHandlers.CreateNoteSemantics(job)
-                    break
-                case JobQueue.UPDATE_SEMANTICS:
-                    await RedisQueueHandlers.UpdateNoteSemantics(job)
-                    break
-                case JobQueue.DELETE_SEMANTICS:
-                    await RedisQueueHandlers.DeleteNoteSemantics(job)
-                    break
-                default:
-                    throw new AppError("Invalid Job Type", StatusCodes.NOT_FOUND)
+            const rawNoteData = await RedisStorage.getItem(`Note:${noteId}`)
+            if(!rawNoteData){
+                console.log("No data found for note: ", noteId)
+                return
             }
-
+            const noteData = JSON.parse(rawNoteData)
+            const {content, status} : {content: string, status: NoteStatusLevel} = noteData
+            
+            await DBHandler.updateNote(status, noteId, undefined, content)
+            await RedisStorage.removeItem(`Note:${noteId}`) 
         }catch(err){
-            console.log("❌ Error in Redis Queue Handlers:", err)
+            console.error("Error in persisting note data", err)
         }
     }
 }
